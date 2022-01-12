@@ -1,16 +1,29 @@
+from datetime import datetime, timezone
 from getpass import getpass
 import json
 import os, os.path
 from pathlib import Path
 
-import requests
+from dateutil.relativedelta import relativedelta
 from keyring import get_keyring, get_password
+import requests
+
+DATETIME_START = datetime(2021, 9, 1, tzinfo=timezone.utc)
+DOWNLOAD_INTERVAL = relativedelta(months=3)
+
+DEFAULT_WORKSPACE_ID = 2686967882418498600
+WORKSPACE_ID = int(os.environ.get("WORKSPACE_ID", DEFAULT_WORKSPACE_ID))
+
+PAGE_SIZE = 100
 
 fromDateTime = "2021-09-01T00:00:00-08:00"
 toDateTime = "2021-12-31T23:59:59-08:00"
+
 workspace = {"workspaceId": 2686967882418498600}
 dateFilter = {"fromDateTime": fromDateTime, "toDateTime": toDateTime}
 headers = {"Accept": "application/json", "Content-Type": "application/json"}
+
+TRANSCRIPT_ENDPOINT = "https://api.gong.io/v2/calls/transcript"
 
 # MAC OS X only and you have to deal with it! (PRs welcome)
 PRIVATE_FOLDER = Path(os.path.expanduser("~")) / "Library/Application Support/Gong\ Transcripts"
@@ -41,41 +54,50 @@ def get_config():
     return config
 
 
-
-def get_transcripts():
-    config = get_config()
+def get_transcript_page(config, cursor=None):
     KEY = config["client_id"]
     SECRET = config['client_secret']
 
-    callLogs = requests.post('https://api.gong.io/v2/calls/transcript',
-                            headers=headers,
-                            auth=(KEY, SECRET),
-                            json={"filter": {**workspace, **dateFilter}}).json()
-
-    all_logs_cnt = callLogs['records']['totalRecords']
-    params = {
-        "count": "100",
-        "cursor": callLogs['records']['cursor']
+    filter_json = {
+        'workspace': WORKSPACE_ID,
+        "fromDateTime": DATETIME_START.isoformat(),
+        "toDateTime": (DATETIME_START + DOWNLOAD_INTERVAL).isoformat(),
+        "count": PAGE_SIZE
     }
 
+    if cursor:
+        filter_json['cursor'] = cursor
 
-    with requests.Session() as req:
-        all_transcripts = []
-        print('All transcripts: ', all_logs_cnt)
-        while all_logs_cnt != len(all_transcripts):
-            print(len(all_transcripts))
-            callLogs = req.post('https://api.gong.io/v2/calls/transcript',
-                                     headers=headers,
-                                     auth=(KEY, SECRET),
-                                     json={"filter": {**workspace, **dateFilter}, "cursor": params['cursor']}).json()
-            params['cursor'] = callLogs['records']['cursor'] if callLogs['records']['currentPageSize'] == 100 else None
+    return requests.post(TRANSCRIPT_ENDPOINT,
+                            headers=headers,
+                            auth=(KEY, SECRET),
+                            json={"filter": {**filter_json}}).json()
 
-            all_transcripts.extend(callLogs['callTranscripts'])
-    
-    return(all_transcripts)
+
+
+def get_transcripts():
+    config = get_config()
+
+    last_page_size = PAGE_SIZE
+    cursor = None
+    transcripts = []
+
+    while last_page_size == PAGE_SIZE:
+        page_data = get_transcript_page(config, cursor)
+        last_page_size = page_data['records']['currentPageSize']
+        cursor = page_data['records']['cursor']
+
+        transcripts = transcripts + page_data['callTranscripts']
+
+    return transcripts
 
 def main():
-    get_transcripts()
+    transcripts = get_transcripts()
+
+    print("Total transcripts downloaded: %s" % len(transcripts))
+    print("Example transcript below")
+    print(json.dumps(transcripts[0]))
+
 
 if __name__ == '__main__':
     main()
