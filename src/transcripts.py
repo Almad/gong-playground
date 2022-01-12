@@ -5,14 +5,15 @@ from math import ceil
 import os, os.path
 from pathlib import Path
 import sys
+from tempfile import mkdtemp
 
 from dateutil.relativedelta import relativedelta
 from keyring import get_keyring, get_password
 import requests
 
+# Must be first day of a month
 DATETIME_START = datetime(2021, 9, 1, tzinfo=timezone.utc)
-DOWNLOAD_INTERVAL = relativedelta(months=3)
-# DOWNLOAD_INTERVAL = relativedelta(days=10)
+NO_OF_MONTHS_TO_DOWNLOAD = 3
 
 VERBOSE = "-v" in sys.argv
 
@@ -52,15 +53,15 @@ def get_config():
     return config
 
 
-def get_transcript_page(config, cursor=None):
+def get_transcript_page(config, start_date, end_date, cursor=None):
     KEY = config["client_id"]
     SECRET = config["client_secret"]
 
     filter_json = {
         "filter": {
             "workspace": WORKSPACE_ID,
-            "fromDateTime": DATETIME_START.isoformat(),
-            "toDateTime": (DATETIME_START + DOWNLOAD_INTERVAL).isoformat(),
+            "fromDateTime": start_date.isoformat(),
+            "toDateTime": end_date.isoformat(),
         }
     }
 
@@ -69,15 +70,20 @@ def get_transcript_page(config, cursor=None):
     if cursor:
         filter_json["cursor"] = cursor
 
-    return requests.post(
+    res = requests.post(
         TRANSCRIPT_ENDPOINT,
         headers=headers,
         auth=(KEY, SECRET),
         json=filter_json,
-    ).json()
+    )
+
+    if res.status_code != 200:
+        raise ValueError(f"Error code {res.status_code} retrieved: \n{res.json()}")
+
+    return res.json()
 
 
-def get_transcripts():
+def get_transcripts(start_date, end_date):
     config = get_config()
 
     total_records = 100 * 100
@@ -85,7 +91,7 @@ def get_transcripts():
     transcripts = []
 
     while len(transcripts) < total_records:
-        page_data = get_transcript_page(config, cursor)
+        page_data = get_transcript_page(config, start_date, end_date, cursor)
 
         cursor = page_data["records"].get("cursor", None)
         total_records = page_data["records"]["totalRecords"]
@@ -100,13 +106,59 @@ def get_transcripts():
     return transcripts
 
 
+def get_transcripts_content(transcripts):
+    return "\n\n".join(
+        [
+            "".join(
+                [
+                    "".join([sentence["text"] for sentence in transcript["sentences"]])
+                    for transcript in call_transcript["transcript"]
+                ]
+            )
+            for call_transcript in transcripts
+        ]
+    )
+
+
+def write_transcripts(output_directory, transcripts, start_date):
+    file_name = f"{start_date.strftime('%Y-%m')}.txt"
+    file_path = os.path.join(output_directory, file_name)
+
+    with open(file_path, "w") as f:
+        f.write(get_transcripts_content(transcripts))
+
+
 def main():
-    transcripts = get_transcripts()
+    total_transcripts = 0
+
+    output_directory = mkdtemp(prefix="gong-transcripts")
 
     if VERBOSE:
-        print("Total transcripts downloaded: %s" % len(transcripts))
+        print(f"Downloading transcripts into {output_directory}")
+
+    for i in range(0, NO_OF_MONTHS_TO_DOWNLOAD):
+        start_date = DATETIME_START
+        if i > 0:
+            start_date = start_date + relativedelta(months=+i)
+        end_date = (start_date + relativedelta(months=1)) - relativedelta(seconds=1)
+
+        if VERBOSE:
+            print(
+                f"Downloading data from date {start_date.isoformat()} to {end_date.isoformat()}"
+            )
+
+        transcripts = get_transcripts(start_date=start_date, end_date=end_date)
+
+        total_transcripts += len(transcripts)
+
+        write_transcripts(output_directory, transcripts, start_date)
+
+    if VERBOSE:
+        print(f"Total transcripts downloaded: {total_transcripts}")
         # print("Example transcript below")
         # print(json.dumps(transcripts[0], indent=2))
+
+    print(f"Transcripts can be found in {output_directory}")
 
 
 if __name__ == "__main__":
